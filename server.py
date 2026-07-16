@@ -8,13 +8,15 @@ prompt handles credential caching for the session — you authenticate once,
 not on every call. Username is fixed since there's only one operator; only
 the password (APP_PASSWORD) is checked.
 """
+import html
 import os
 import secrets
+from urllib.parse import quote
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Form, HTTPException, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 load_dotenv(override=True)
@@ -175,29 +177,37 @@ PAGE = """<!doctype html>
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(_: None = Depends(require_auth)):
-    return PAGE.format(message="")
+async def index(ok: str = "", err: str = "", _: None = Depends(require_auth)):
+    if ok:
+        message = f"<div class='banner ok'>Call started to {html.escape(ok)}.</div>"
+    elif err:
+        message = f"<div class='banner err'>Failed: {html.escape(err)}</div>"
+    else:
+        message = ""
+    return PAGE.format(message=message)
 
 
-@app.post("/call", response_class=HTMLResponse)
+@app.post("/call")
 async def call(to_number: str = Form(...), _: None = Depends(require_auth)):
+    to_number = to_number.strip()
     async with httpx.AsyncClient() as client:
         resp = await client.post(
-            f"https://api.twilio.com/2010-04-01/Accounts/{os.getenv('TWILIO_ACCOUNT_SID')}/Calls.json",
+            f"https://api.twilio.com/2010-04-01/Accounts/{os.getenv('TWILIO_ACCOUNT_SID', '').strip()}/Calls.json",
             data={
                 "To": to_number,
-                "From": os.getenv("TWILIO_FROM_NUMBER"),
-                "Url": os.getenv("VOICE_WEBHOOK_URL"),
+                "From": os.getenv("TWILIO_FROM_NUMBER", "").strip(),
+                "Url": os.getenv("VOICE_WEBHOOK_URL", "").strip(),
             },
-            auth=(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN")),
+            auth=(os.getenv("TWILIO_ACCOUNT_SID", "").strip(), os.getenv("TWILIO_AUTH_TOKEN", "").strip()),
         )
 
+    # Redirect-after-POST: refreshing the resulting page just re-GETs "/"
+    # instead of resubmitting the call, which a bare HTML response would do.
     if resp.status_code >= 400:
-        message = f"<div class='banner err'>Failed: {resp.text}</div>"
+        query = f"err={quote(resp.text[:300])}"
     else:
-        message = f"<div class='banner ok'>Call started to {to_number}.</div>"
-
-    return PAGE.format(message=message)
+        query = f"ok={quote(to_number)}"
+    return RedirectResponse(url=f"/?{query}", status_code=status.HTTP_303_SEE_OTHER)
 
 
 if __name__ == "__main__":
